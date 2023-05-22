@@ -34,6 +34,14 @@ pub struct CCS<G: Group> {
   _p: PhantomData<G>,
 }
 
+// A type that holds the shape of a CCS instance
+// Unlike R1CS we have a list of matrices M instead of only A, B, C
+// We also have t, q, d constants and c (vector), S (set)
+// TODO Add c and S
+
+// Make CCShape default to these values:
+// n=n, m=m, N=N, l=l, t=3, q=2, d=2
+// M={A,B,C}, S={{0, 1}, {2}}, c={1,−1}
 pub struct CCSShape<G: Group> {
     pub(crate) num_cons: usize,
     pub(crate) num_vars: usize,
@@ -42,34 +50,32 @@ pub struct CCSShape<G: Group> {
     pub(crate) t: usize,
     pub(crate) q: usize,
     pub(crate) d: usize,
+    pub(crate) S: Vec<Vec<usize>>,
+    pub(crate) c: Vec<usize>,
     digest: G::Scalar, // digest of the rest of CCSShape
 }
 
 // TODO Function to convert R1CS to CCS
 // Put here or in r1cs module
-// R1CS-to-CCS parameters:
-// n=n, m=m, N=N, l=l, t=3, q=2, d=2
-// M={A,B,C}, S={{0, 1}, {2}}, c={1,−1}
 
 // TODO: CCSShape implementation
-impl<G: Group> R1CSShape<G> {
-    /// Create an object of type `R1CSShape` from the explicitly specified R1CS matrices
+
+impl<G: Group> CCSShape<G> {
+    /// Create an object of type `CCSSShape` from the explicitly specified CCS matrices
     pub fn new(
       num_cons: usize,
       num_vars: usize,
       num_io: usize,
-      A: &[(usize, usize, G::Scalar)],
-      B: &[(usize, usize, G::Scalar)],
-      C: &[(usize, usize, G::Scalar)],
-    ) -> Result<R1CSShape<G>, NovaError> {
+      M: &[Vec<(usize, usize, G::Scalar)>],
+    ) -> Result<CCSShape<G>, NovaError> {
       let is_valid = |num_cons: usize,
                       num_vars: usize,
                       num_io: usize,
-                      M: &[(usize, usize, G::Scalar)]|
+                      matrix: &[(usize, usize, G::Scalar)]|
        -> Result<(), NovaError> {
-        let res = (0..M.len())
+        let res = (0..matrix.len())
           .map(|i| {
-            let (row, col, _val) = M[i];
+            let (row, col, _val) = matrix[i];
             if row >= num_cons || col > num_io + num_vars {
               Err(NovaError::InvalidIndex)
             } else {
@@ -84,12 +90,15 @@ impl<G: Group> R1CSShape<G> {
           Ok(())
         }
       };
-  
-      let res_A = is_valid(num_cons, num_vars, num_io, A);
-      let res_B = is_valid(num_cons, num_vars, num_io, B);
-      let res_C = is_valid(num_cons, num_vars, num_io, C);
-  
-      if res_A.is_err() || res_B.is_err() || res_C.is_err() {
+
+      // Check that the row and column indexes are within the range of the number of constraints and variables
+      let res_M = M
+        .iter()
+        .map(|m| is_valid(num_cons, num_vars, num_io, m))
+        .collect::<Result<Vec<()>, NovaError>>();
+
+      // If any of the matricies are invalid, return an error
+      if res_M.is_err() {
         return Err(NovaError::InvalidIndex);
       }
   
@@ -98,27 +107,27 @@ impl<G: Group> R1CSShape<G> {
         return Err(NovaError::OddInputLength);
       }
   
-      let digest = Self::compute_digest(num_cons, num_vars, num_io, A, B, C);
+      let digest = Self::compute_digest(num_cons, num_vars, num_io, M);
 
-      // TODO: We assume the following constants for now
-      // # fixed parameters (and n, m, l are direct from R1CS)
-      // t=3
-      // q=2
-      // d=2
-      // S1=[0,1]
-      // S2=[2]
-      // S = [S1, S2]
-      // c0=1
-      // c1=-1
-      // c = [c0, c1]
-        
-      let shape = R1CSShape {
+      // NOTE: We assume the following constants for R1CS-to-CCS
+      const T: usize = 3;
+      const Q: usize = 2;
+      const D: usize = 2;
+      const S: [[usize; 2]; 1] = [[0, 1]];
+      const S2: [usize; 1] = [2];
+      const C0: i32 = 1;
+      const C1: i32 = -1;
+
+      let shape = CCSShape {
         num_cons,
         num_vars,
         num_io,
-        A: A.to_owned(),
-        B: B.to_owned(),
-        C: C.to_owned(),
+        M: M.to_vec(),
+        t: T,
+        q: Q,
+        d: D,
+        S: vec![S[0].to_vec(), S2.to_vec()],
+        c: vec![C0 as usize, C1 as usize],
         digest,
       };
   
@@ -308,30 +317,24 @@ impl<G: Group> R1CSShape<G> {
     num_cons: usize,
     num_vars: usize,
     num_io: usize,
-    A: &[(usize, usize, G::Scalar)],
-    B: &[(usize, usize, G::Scalar)],
-    C: &[(usize, usize, G::Scalar)],
+    M: &[Vec<(usize, usize, G::Scalar)>],
   ) -> G::Scalar {
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    struct R1CSShapeWithoutDigest<G: Group> {
+    struct CCSShapeWithoutDigest<G: Group> {
       num_cons: usize,
       num_vars: usize,
       num_io: usize,
-      A: Vec<(usize, usize, G::Scalar)>,
-      B: Vec<(usize, usize, G::Scalar)>,
-      C: Vec<(usize, usize, G::Scalar)>,
+      M: Vec<Vec<(usize, usize, G::Scalar)>>,
     }
 
-    let shape = R1CSShapeWithoutDigest::<G> {
+    let shape = CCSShapeWithoutDigest::<G> {
       num_cons,
       num_vars,
       num_io,
-      A: A.to_vec(),
-      B: B.to_vec(),
-      C: C.to_vec(),
+      M: M.to_vec(),
     };
 
-    // obtain a vector of bytes representing the R1CS shape
+    // obtain a vector of bytes representing the CCS shape
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     bincode::serialize_into(&mut encoder, &shape).unwrap();
     let shape_bytes = encoder.finish().unwrap();
@@ -374,15 +377,13 @@ impl<G: Group> R1CSShape<G> {
     // check if the number of variables are as expected, then
     // we simply set the number of constraints to the next power of two
     if self.num_vars == m {
-      let digest = Self::compute_digest(m, self.num_vars, self.num_io, &self.A, &self.B, &self.C);
+      let digest = Self::compute_digest(m, self.num_vars, self.num_io, &self.M);
 
-      return R1CSShape {
+      return CCSShape {
         num_cons: m,
         num_vars: m,
         num_io: self.num_io,
-        A: self.A.clone(),
-        B: self.B.clone(),
-        C: self.C.clone(),
+        M: self.M.clone(),
         digest,
       };
     }
@@ -406,26 +407,22 @@ impl<G: Group> R1CSShape<G> {
         .collect::<Vec<_>>()
     };
 
-    let A_padded = apply_pad(&self.A);
-    let B_padded = apply_pad(&self.B);
-    let C_padded = apply_pad(&self.C);
+  
+    // Apply pad for each matrix in M
+    let M_padded = self.M.iter().map(|m| apply_pad(m)).collect::<Vec<_>>();
 
     let digest = Self::compute_digest(
       num_cons_padded,
       num_vars_padded,
       self.num_io,
-      &A_padded,
-      &B_padded,
-      &C_padded,
+      &M_padded,
     );
 
-    R1CSShape {
+    CCSShape {
       num_cons: num_cons_padded,
       num_vars: num_vars_padded,
       num_io: self.num_io,
-      A: A_padded,
-      B: B_padded,
-      C: C_padded,
+      M: M_padded,
       digest,
     }
   }
