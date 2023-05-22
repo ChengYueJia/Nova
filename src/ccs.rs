@@ -248,3 +248,185 @@ impl<G: Group> R1CSShape<G> {
         Err(NovaError::UnSat)
       }
     }
+
+      /// A method to compute a commitment to the cross-term `T` given a
+  /// Relaxed R1CS instance-witness pair and an R1CS instance-witness pair
+  pub fn commit_T(
+    &self,
+    ck: &CommitmentKey<G>,
+    U1: &RelaxedR1CSInstance<G>,
+    W1: &RelaxedR1CSWitness<G>,
+    U2: &R1CSInstance<G>,
+    W2: &R1CSWitness<G>,
+  ) -> Result<(Vec<G::Scalar>, Commitment<G>), NovaError> {
+    let (AZ_1, BZ_1, CZ_1) = {
+      let Z1 = concat(vec![W1.W.clone(), vec![U1.u], U1.X.clone()]);
+      self.multiply_vec(&Z1)?
+    };
+
+    let (AZ_2, BZ_2, CZ_2) = {
+      let Z2 = concat(vec![W2.W.clone(), vec![G::Scalar::ONE], U2.X.clone()]);
+      self.multiply_vec(&Z2)?
+    };
+
+    let AZ_1_circ_BZ_2 = (0..AZ_1.len())
+      .into_par_iter()
+      .map(|i| AZ_1[i] * BZ_2[i])
+      .collect::<Vec<G::Scalar>>();
+    let AZ_2_circ_BZ_1 = (0..AZ_2.len())
+      .into_par_iter()
+      .map(|i| AZ_2[i] * BZ_1[i])
+      .collect::<Vec<G::Scalar>>();
+    let u_1_cdot_CZ_2 = (0..CZ_2.len())
+      .into_par_iter()
+      .map(|i| U1.u * CZ_2[i])
+      .collect::<Vec<G::Scalar>>();
+    let u_2_cdot_CZ_1 = (0..CZ_1.len())
+      .into_par_iter()
+      .map(|i| CZ_1[i])
+      .collect::<Vec<G::Scalar>>();
+
+    let T = AZ_1_circ_BZ_2
+      .par_iter()
+      .zip(&AZ_2_circ_BZ_1)
+      .zip(&u_1_cdot_CZ_2)
+      .zip(&u_2_cdot_CZ_1)
+      .map(|(((a, b), c), d)| *a + *b - *c - *d)
+      .collect::<Vec<G::Scalar>>();
+
+    let comm_T = CE::<G>::commit(ck, &T);
+
+    Ok((T, comm_T))
+  }
+
+  /// returns the digest of R1CSShape
+  pub fn get_digest(&self) -> G::Scalar {
+    self.digest
+  }
+
+  fn compute_digest(
+    num_cons: usize,
+    num_vars: usize,
+    num_io: usize,
+    A: &[(usize, usize, G::Scalar)],
+    B: &[(usize, usize, G::Scalar)],
+    C: &[(usize, usize, G::Scalar)],
+  ) -> G::Scalar {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct R1CSShapeWithoutDigest<G: Group> {
+      num_cons: usize,
+      num_vars: usize,
+      num_io: usize,
+      A: Vec<(usize, usize, G::Scalar)>,
+      B: Vec<(usize, usize, G::Scalar)>,
+      C: Vec<(usize, usize, G::Scalar)>,
+    }
+
+    let shape = R1CSShapeWithoutDigest::<G> {
+      num_cons,
+      num_vars,
+      num_io,
+      A: A.to_vec(),
+      B: B.to_vec(),
+      C: C.to_vec(),
+    };
+
+    // obtain a vector of bytes representing the R1CS shape
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    bincode::serialize_into(&mut encoder, &shape).unwrap();
+    let shape_bytes = encoder.finish().unwrap();
+
+    // convert shape_bytes into a short digest
+    let mut hasher = Sha3_256::new();
+    hasher.input(&shape_bytes);
+    let digest = hasher.result();
+
+    // truncate the digest to 250 bits
+    let bv = (0..NUM_HASH_BITS).map(|i| {
+      let (byte_pos, bit_pos) = (i / 8, i % 8);
+      let bit = (digest[byte_pos] >> bit_pos) & 1;
+      bit == 1
+    });
+
+    // turn the bit vector into a scalar
+    let mut res = G::Scalar::ZERO;
+    let mut coeff = G::Scalar::ONE;
+    for bit in bv {
+      if bit {
+        res += coeff;
+      }
+      coeff += coeff;
+    }
+    res
+  }
+
+  /// Pads the R1CSShape so that the number of variables is a power of two
+  /// Renumbers variables to accomodate padded variables
+  pub fn pad(&self) -> Self {
+    // equalize the number of variables and constraints
+    let m = max(self.num_vars, self.num_cons).next_power_of_two();
+
+    // check if the provided R1CSShape is already as required
+    if self.num_vars == m && self.num_cons == m {
+      return self.clone();
+    }
+
+    // check if the number of variables are as expected, then
+    // we simply set the number of constraints to the next power of two
+    if self.num_vars == m {
+      let digest = Self::compute_digest(m, self.num_vars, self.num_io, &self.A, &self.B, &self.C);
+
+      return R1CSShape {
+        num_cons: m,
+        num_vars: m,
+        num_io: self.num_io,
+        A: self.A.clone(),
+        B: self.B.clone(),
+        C: self.C.clone(),
+        digest,
+      };
+    }
+
+    // otherwise, we need to pad the number of variables and renumber variable accesses
+    let num_vars_padded = m;
+    let num_cons_padded = m;
+    let apply_pad = |M: &[(usize, usize, G::Scalar)]| -> Vec<(usize, usize, G::Scalar)> {
+      M.par_iter()
+        .map(|(r, c, v)| {
+          (
+            *r,
+            if c >= &self.num_vars {
+              c + num_vars_padded - self.num_vars
+            } else {
+              *c
+            },
+            *v,
+          )
+        })
+        .collect::<Vec<_>>()
+    };
+
+    let A_padded = apply_pad(&self.A);
+    let B_padded = apply_pad(&self.B);
+    let C_padded = apply_pad(&self.C);
+
+    let digest = Self::compute_digest(
+      num_cons_padded,
+      num_vars_padded,
+      self.num_io,
+      &A_padded,
+      &B_padded,
+      &C_padded,
+    );
+
+    R1CSShape {
+      num_cons: num_cons_padded,
+      num_vars: num_vars_padded,
+      num_io: self.num_io,
+      A: A_padded,
+      B: B_padded,
+      C: C_padded,
+      digest,
+    }
+  }
+}
