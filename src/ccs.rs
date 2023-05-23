@@ -1,5 +1,6 @@
 //! This module defines CCS related types and functions.
-/// See https://eprint.iacr.org/2023/552
+#![allow(unused_imports)]
+#![allow(dead_code)]
 #![allow(clippy::type_complexity)]
 use crate::{
   constants::{BN_LIMB_WIDTH, BN_N_LIMBS, NUM_HASH_BITS},
@@ -42,6 +43,7 @@ pub struct CCS<G: Group> {
 // Make CCShape default to these values:
 // n=n, m=m, N=N, l=l, t=3, q=2, d=2
 // M={A,B,C}, S={{0, 1}, {2}}, c={1,−1}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CCSShape<G: Group> {
     pub(crate) num_cons: usize,
     pub(crate) num_vars: usize,
@@ -54,6 +56,22 @@ pub struct CCSShape<G: Group> {
     pub(crate) c: Vec<usize>,
     digest: G::Scalar, // digest of the rest of CCSShape
 }
+
+/// A type that holds a witness for a given CCS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CCSWitness<G: Group> {
+  W: Vec<G::Scalar>,
+}
+
+/// A type that holds an CCS instance
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct CCSInstance<G: Group> {
+  pub(crate) comm_W: Commitment<G>,
+  pub(crate) X: Vec<G::Scalar>,
+}
+
+// TODO Type for other CCS types, eqv to RelaxedR1CS
 
 // TODO Function to convert R1CS to CCS
 // Put here or in r1cs module
@@ -134,6 +152,7 @@ impl<G: Group> CCSShape<G> {
       Ok(shape)
     }
   
+    // TODO This has to be updated for CCS to not just return Az, Bz, Cz
     pub fn multiply_vec(
       &self,
       z: &[G::Scalar],
@@ -142,14 +161,14 @@ impl<G: Group> CCSShape<G> {
         return Err(NovaError::InvalidWitnessLength);
       }
   
-      // computes a product between a sparse matrix `M` and a vector `z`
+      // computes a product between a sparse matrix `matrix` and a vector `z`
       // This does not perform any validation of entries in M (e.g., if entries in `M` reference indexes outside the range of `z`)
       // This is safe since we know that `M` is valid
       let sparse_matrix_vec_product =
-        |M: &Vec<(usize, usize, G::Scalar)>, num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
-          (0..M.len())
+        |matrix: &Vec<(usize, usize, G::Scalar)>, num_rows: usize, z: &[G::Scalar]| -> Vec<G::Scalar> {
+          (0..matrix.len())
             .map(|i| {
-              let (row, col, val) = M[i];
+              let (row, col, val) =matrix[i];
               (row, val * z[col])
             })
             .fold(vec![G::Scalar::ZERO; num_rows], |mut Mz, (r, v)| {
@@ -158,12 +177,17 @@ impl<G: Group> CCSShape<G> {
             })
         };
   
+        // XXX: Hacky, assumes M is A, B, C (true for R1CS)
+        let A = self.M[0].clone();
+        let B = self.M[1].clone();
+        let C = self.M[2].clone();
+
       let (Az, (Bz, Cz)) = rayon::join(
-        || sparse_matrix_vec_product(&self.A, self.num_cons, z),
+        || sparse_matrix_vec_product(&A, self.num_cons, z),
         || {
           rayon::join(
-            || sparse_matrix_vec_product(&self.B, self.num_cons, z),
-            || sparse_matrix_vec_product(&self.C, self.num_cons, z),
+            || sparse_matrix_vec_product(&B, self.num_cons, z),
+            || sparse_matrix_vec_product(&C, self.num_cons, z),
           )
         },
       );
@@ -172,51 +196,51 @@ impl<G: Group> CCSShape<G> {
     }
   
     /// Checks if the Relaxed R1CS instance is satisfiable given a witness and its shape
-    pub fn is_sat_relaxed(
-      &self,
-      ck: &CommitmentKey<G>,
-      U: &RelaxedR1CSInstance<G>,
-      W: &RelaxedR1CSWitness<G>,
-    ) -> Result<(), NovaError> {
-      assert_eq!(W.W.len(), self.num_vars);
-      assert_eq!(W.E.len(), self.num_cons);
-      assert_eq!(U.X.len(), self.num_io);
+    // pub fn is_sat_relaxed(
+    //   &self,
+    //   ck: &CommitmentKey<G>,
+    //   U: &RelaxedR1CSInstance<G>,
+    //   W: &RelaxedR1CSWitness<G>,
+    // ) -> Result<(), NovaError> {
+    //   assert_eq!(W.W.len(), self.num_vars);
+    //   assert_eq!(W.E.len(), self.num_cons);
+    //   assert_eq!(U.X.len(), self.num_io);
   
-      // verify if Az * Bz = u*Cz + E
-      let res_eq: bool = {
-        let z = concat(vec![W.W.clone(), vec![U.u], U.X.clone()]);
-        let (Az, Bz, Cz) = self.multiply_vec(&z)?;
-        assert_eq!(Az.len(), self.num_cons);
-        assert_eq!(Bz.len(), self.num_cons);
-        assert_eq!(Cz.len(), self.num_cons);
+    //   // verify if Az * Bz = u*Cz + E
+    //   let res_eq: bool = {
+    //     let z = concat(vec![W.W.clone(), vec![U.u], U.X.clone()]);
+    //     let (Az, Bz, Cz) = self.multiply_vec(&z)?;
+    //     assert_eq!(Az.len(), self.num_cons);
+    //     assert_eq!(Bz.len(), self.num_cons);
+    //     assert_eq!(Cz.len(), self.num_cons);
   
-        let res: usize = (0..self.num_cons)
-          .map(|i| usize::from(Az[i] * Bz[i] != U.u * Cz[i] + W.E[i]))
-          .sum();
+    //     let res: usize = (0..self.num_cons)
+    //       .map(|i| usize::from(Az[i] * Bz[i] != U.u * Cz[i] + W.E[i]))
+    //       .sum();
   
-        res == 0
-      };
+    //     res == 0
+    //   };
   
-      // verify if comm_E and comm_W are commitments to E and W
-      let res_comm: bool = {
-        let (comm_W, comm_E) =
-          rayon::join(|| CE::<G>::commit(ck, &W.W), || CE::<G>::commit(ck, &W.E));
-        U.comm_W == comm_W && U.comm_E == comm_E
-      };
+    //   // verify if comm_E and comm_W are commitments to E and W
+    //   let res_comm: bool = {
+    //     let (comm_W, comm_E) =
+    //       rayon::join(|| CE::<G>::commit(ck, &W.W), || CE::<G>::commit(ck, &W.E));
+    //     U.comm_W == comm_W && U.comm_E == comm_E
+    //   };
   
-      if res_eq && res_comm {
-        Ok(())
-      } else {
-        Err(NovaError::UnSat)
-      }
-    }
+    //   if res_eq && res_comm {
+    //     Ok(())
+    //   } else {
+    //     Err(NovaError::UnSat)
+    //   }
+    // }
   
     /// Checks if the CCS instance is satisfiable given a witness and its shape
     pub fn is_sat(
       &self,
       ck: &CommitmentKey<G>,
-      U: &R1CSInstance<G>,
-      W: &R1CSWitness<G>,
+      U: &CCSInstance<G>,
+      W: &CCSWitness<G>,
     ) -> Result<(), NovaError> {
       assert_eq!(W.W.len(), self.num_vars);
       assert_eq!(U.X.len(), self.num_io);
@@ -260,53 +284,53 @@ impl<G: Group> CCSShape<G> {
 
       /// A method to compute a commitment to the cross-term `T` given a
   /// Relaxed R1CS instance-witness pair and an R1CS instance-witness pair
-  pub fn commit_T(
-    &self,
-    ck: &CommitmentKey<G>,
-    U1: &RelaxedR1CSInstance<G>,
-    W1: &RelaxedR1CSWitness<G>,
-    U2: &R1CSInstance<G>,
-    W2: &R1CSWitness<G>,
-  ) -> Result<(Vec<G::Scalar>, Commitment<G>), NovaError> {
-    let (AZ_1, BZ_1, CZ_1) = {
-      let Z1 = concat(vec![W1.W.clone(), vec![U1.u], U1.X.clone()]);
-      self.multiply_vec(&Z1)?
-    };
+  // pub fn commit_T(
+  //   &self,
+  //   ck: &CommitmentKey<G>,
+  //   U1: &RelaxedR1CSInstance<G>,
+  //   W1: &RelaxedR1CSWitness<G>,
+  //   U2: &R1CSInstance<G>,
+  //   W2: &R1CSWitness<G>,
+  // ) -> Result<(Vec<G::Scalar>, Commitment<G>), NovaError> {
+  //   let (AZ_1, BZ_1, CZ_1) = {
+  //     let Z1 = concat(vec![W1.W.clone(), vec![U1.u], U1.X.clone()]);
+  //     self.multiply_vec(&Z1)?
+  //   };
 
-    let (AZ_2, BZ_2, CZ_2) = {
-      let Z2 = concat(vec![W2.W.clone(), vec![G::Scalar::ONE], U2.X.clone()]);
-      self.multiply_vec(&Z2)?
-    };
+  //   let (AZ_2, BZ_2, CZ_2) = {
+  //     let Z2 = concat(vec![W2.W.clone(), vec![G::Scalar::ONE], U2.X.clone()]);
+  //     self.multiply_vec(&Z2)?
+  //   };
 
-    let AZ_1_circ_BZ_2 = (0..AZ_1.len())
-      .into_par_iter()
-      .map(|i| AZ_1[i] * BZ_2[i])
-      .collect::<Vec<G::Scalar>>();
-    let AZ_2_circ_BZ_1 = (0..AZ_2.len())
-      .into_par_iter()
-      .map(|i| AZ_2[i] * BZ_1[i])
-      .collect::<Vec<G::Scalar>>();
-    let u_1_cdot_CZ_2 = (0..CZ_2.len())
-      .into_par_iter()
-      .map(|i| U1.u * CZ_2[i])
-      .collect::<Vec<G::Scalar>>();
-    let u_2_cdot_CZ_1 = (0..CZ_1.len())
-      .into_par_iter()
-      .map(|i| CZ_1[i])
-      .collect::<Vec<G::Scalar>>();
+  //   let AZ_1_circ_BZ_2 = (0..AZ_1.len())
+  //     .into_par_iter()
+  //     .map(|i| AZ_1[i] * BZ_2[i])
+  //     .collect::<Vec<G::Scalar>>();
+  //   let AZ_2_circ_BZ_1 = (0..AZ_2.len())
+  //     .into_par_iter()
+  //     .map(|i| AZ_2[i] * BZ_1[i])
+  //     .collect::<Vec<G::Scalar>>();
+  //   let u_1_cdot_CZ_2 = (0..CZ_2.len())
+  //     .into_par_iter()
+  //     .map(|i| U1.u * CZ_2[i])
+  //     .collect::<Vec<G::Scalar>>();
+  //   let u_2_cdot_CZ_1 = (0..CZ_1.len())
+  //     .into_par_iter()
+  //     .map(|i| CZ_1[i])
+  //     .collect::<Vec<G::Scalar>>();
 
-    let T = AZ_1_circ_BZ_2
-      .par_iter()
-      .zip(&AZ_2_circ_BZ_1)
-      .zip(&u_1_cdot_CZ_2)
-      .zip(&u_2_cdot_CZ_1)
-      .map(|(((a, b), c), d)| *a + *b - *c - *d)
-      .collect::<Vec<G::Scalar>>();
+  //   let T = AZ_1_circ_BZ_2
+  //     .par_iter()
+  //     .zip(&AZ_2_circ_BZ_1)
+  //     .zip(&u_1_cdot_CZ_2)
+  //     .zip(&u_2_cdot_CZ_1)
+  //     .map(|(((a, b), c), d)| *a + *b - *c - *d)
+  //     .collect::<Vec<G::Scalar>>();
 
-    let comm_T = CE::<G>::commit(ck, &T);
+  //   let comm_T = CE::<G>::commit(ck, &T);
 
-    Ok((T, comm_T))
-  }
+  //   Ok((T, comm_T))
+  // }
 
   /// returns the digest of R1CSShape
   pub fn get_digest(&self) -> G::Scalar {
@@ -379,11 +403,25 @@ impl<G: Group> CCSShape<G> {
     if self.num_vars == m {
       let digest = Self::compute_digest(m, self.num_vars, self.num_io, &self.M);
 
+      // NOTE: We assume the following constants for R1CS-to-CCS
+      const T: usize = 3;
+      const Q: usize = 2;
+      const D: usize = 2;
+      const S: [[usize; 2]; 1] = [[0, 1]];
+      const S2: [usize; 1] = [2];
+      const C0: i32 = 1;
+      const C1: i32 = -1;
+
       return CCSShape {
         num_cons: m,
         num_vars: m,
         num_io: self.num_io,
         M: self.M.clone(),
+        t: T,
+        q: Q,
+        d: D,
+        S: vec![S[0].to_vec(), S2.to_vec()],
+        c: vec![C0 as usize, C1 as usize],
         digest,
       };
     }
@@ -418,12 +456,60 @@ impl<G: Group> CCSShape<G> {
       &M_padded,
     );
 
+     // NOTE: We assume the following constants for R1CS-to-CCS
+     const T: usize = 3;
+     const Q: usize = 2;
+     const D: usize = 2;
+     const S: [[usize; 2]; 1] = [[0, 1]];
+     const S2: [usize; 1] = [2];
+     const C0: i32 = 1;
+     const C1: i32 = -1;
+
     CCSShape {
       num_cons: num_cons_padded,
       num_vars: num_vars_padded,
       num_io: self.num_io,
       M: M_padded,
+      t: T,
+      q: Q,
+      d: D,
+      S: vec![S[0].to_vec(), S2.to_vec()],
+      c: vec![C0 as usize, C1 as usize],
       digest,
+    }
+  }
+}
+
+impl<G: Group> CCSWitness<G> {
+  /// A method to create a witness object using a vector of scalars
+  pub fn new(S: &CCSShape<G>, W: &[G::Scalar]) -> Result<CCSWitness<G>, NovaError> {
+    if S.num_vars != W.len() {
+      Err(NovaError::InvalidWitnessLength)
+    } else {
+      Ok(CCSWitness { W: W.to_owned() })
+    }
+  }
+
+  /// Commits to the witness using the supplied generators
+  pub fn commit(&self, ck: &CommitmentKey<G>) -> Commitment<G> {
+    CE::<G>::commit(ck, &self.W)
+  }
+}
+
+impl<G: Group> CCSInstance<G> {
+  /// A method to create an instance object using consitituent elements
+  pub fn new(
+    S: &CCSShape<G>,
+    comm_W: &Commitment<G>,
+    X: &[G::Scalar],
+  ) -> Result<CCSInstance<G>, NovaError> {
+    if S.num_io != X.len() {
+      Err(NovaError::InvalidInputLength)
+    } else {
+      Ok(CCSInstance {
+        comm_W: *comm_W,
+        X: X.to_owned(),
+      })
     }
   }
 }
