@@ -16,6 +16,13 @@ To run example:
 cargo run --example minroot
 ```
 
+To obtain flamegraph:
+```bash
+# some time needs to execute below with `sudo`
+CARGO_PROFILE_BENCH_DEBUG=true cargo flamegraph --bench recursive-snark
+CARGO_PROFILE_BENCH_DEBUG=true cargo flamegraph --example minroot
+```
+
 ## References
 [Nova: Recursive Zero-Knowledge Arguments from Folding Schemes](https://eprint.iacr.org/2021/370) \
 Abhiram Kothapalli, Srinath Setty, and Ioanna Tzialla \
