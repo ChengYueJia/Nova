@@ -58,7 +58,7 @@ pub struct NovaAugmentedCircuitInputs<G: Group> {
   zi: Option<Vec<G::Base>>,
   U: Option<RelaxedR1CSInstance<G>>,
   u: Option<R1CSInstance<G>>,
-  T: Option<Commitment<G>>,
+  T: Option<Commitment<G>>, // commit_T
 }
 
 impl<G: Group> NovaAugmentedCircuitInputs<G> {
@@ -85,13 +85,13 @@ impl<G: Group> NovaAugmentedCircuitInputs<G> {
   }
 }
 
-/// The augmented circuit F' in Nova that includes a step circuit F
+/// The augmented circuit `F'` in Nova that includes a step circuit `F`
 /// and the circuit for the verifier in Nova's non-interactive folding scheme
 pub struct NovaAugmentedCircuit<G: Group, SC: StepCircuit<G::Base>> {
   params: NovaAugmentedCircuitParams,
   ro_consts: ROConstantsCircuit<G>,
   inputs: Option<NovaAugmentedCircuitInputs<G>>,
-  step_circuit: SC, // The function that is applied for each step
+  step_circuit: SC, // The program function 'F' that is applied for each step
 }
 
 impl<G: Group, SC: StepCircuit<G::Base>> NovaAugmentedCircuit<G, SC> {
