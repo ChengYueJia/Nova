@@ -210,7 +210,10 @@ impl<G: Group, SC: StepCircuit<G::Base>> NovaAugmentedCircuit<G, SC> {
   }
 
   /// Synthesizes non base case and returns the new relaxed R1CSInstance
-  /// And a boolean indicating if all checks pass
+  /// And a boolean indicating if all checks pass.
+  /// As `F'`, this method does
+  /// (1) Check u.x0 = Hash(params, U, i, z0, zi)
+  /// (2) NIFS.verify and obtain $U_{i+1}$
   #[allow(clippy::too_many_arguments)]
   fn synthesize_non_base_case<CS: ConstraintSystem<<G as Group>::Base>>(
     &self,
@@ -224,7 +227,7 @@ impl<G: Group, SC: StepCircuit<G::Base>> NovaAugmentedCircuit<G, SC> {
     T: &AllocatedPoint<G>,
     arity: usize,
   ) -> Result<(AllocatedRelaxedR1CSInstance<G>, AllocatedBit), SynthesisError> {
-    // Check that u.x[0] = Hash(params, U, i, z0, zi)
+    // Check that u.x0 = Hash(params, U, i, z0, zi)
     let mut ro = G::ROCircuit::new(
       self.ro_consts.clone(),
       NUM_FE_WITHOUT_IO_FOR_CRHF + 2 * arity,
@@ -265,6 +268,7 @@ impl<G: Group, SC: StepCircuit<G::Base>> NovaAugmentedCircuit<G, SC> {
 impl<G: Group, SC: StepCircuit<G::Base>> Circuit<<G as Group>::Base>
   for NovaAugmentedCircuit<G, SC>
 {
+  /// This method does `F'`'s checks as paper described
   fn synthesize<CS: ConstraintSystem<<G as Group>::Base>>(
     self,
     cs: &mut CS,
